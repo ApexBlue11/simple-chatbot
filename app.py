@@ -1,35 +1,24 @@
-# app.py
+# app.py (updated for openai>=1.0.0)
+import os
 import streamlit as st
-import openai
-from typing import List, Dict
 
-st.set_page_config(page_title="Simple Chat — Streamlit Cloud", page_icon="💬")
+# Use the new client from openai-python v1+
+try:
+    from openai import OpenAI, APIError  # APIError available in new client
+except Exception:
+    # Fallback if the environment is weird; still import client
+    from openai import OpenAI
+    APIError = Exception
+
+st.set_page_config(page_title="Simple Chat — Streamlit Cloud (OpenAI v1+)", page_icon="💬")
 st.title("Simple Chat — Streamlit Cloud (gpt-3.5-turbo)")
 
-# Sidebar: settings / API key
-st.sidebar.header("Settings")
-
-# First, prefer API key from Streamlit Secrets (recommended on Streamlit Cloud)
-secrets_key = None
-try:
-    secrets_key = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    secrets_key = None
-
-if secrets_key:
-    st.sidebar.success("Using OpenAI key from Streamlit Secrets.")
-else:
-    st.sidebar.info("No OpenAI key found in Streamlit Secrets. You can paste one below (only for this session).")
-
-# Manual API key input fallback (won't be saved to repo)
+# Sidebar: read secrets if present (Streamlit Cloud)
+secrets_key = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
 manual_key = st.sidebar.text_input(
-    "OpenAI API Key (manual, session only)",
-    placeholder="sk-...",
-    type="password",
-    help="Paste your OpenAI key here if you didn't add it to Streamlit Secrets."
+    "OpenAI API Key (manual, session only)", placeholder="sk-...", type="password"
 )
 
-# Choose model (default = smallest practical)
 model = st.sidebar.selectbox("Model", ["gpt-3.5-turbo"], index=0)
 temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.7, 0.05)
 
@@ -37,65 +26,63 @@ if st.sidebar.button("Clear chat"):
     st.session_state.pop("messages", None)
     st.experimental_rerun()
 
-# Initialize message history in session state
+# Initialize history
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "system", "content": "You are a helpful assistant."}
-    ]
+    st.session_state.messages = [{"role": "system", "content": "You are a helpful assistant."}]
 
-# Helper to display messages
-def render_messages(messages: List[Dict[str, str]]):
-    for msg in messages:
-        if msg["role"] == "system":
-            # Optionally show a small hint for system message
+# helper to render messages
+def render_messages(messages):
+    for m in messages:
+        if m["role"] == "system":
             continue
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
+        with st.chat_message(m["role"]):
+            st.write(m["content"])
 
-# Render existing conversation
 render_messages(st.session_state.messages)
 
-# Chat input
+# input
 if prompt := st.chat_input("Type your message..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
     # Resolve API key (secrets preferred)
-    openai_api_key = secrets_key or manual_key or ""
+    openai_api_key = secrets_key or manual_key or os.environ.get("OPENAI_API_KEY") or ""
     if not openai_api_key:
-        st.error("No OpenAI API key available. Add it to Streamlit Secrets or paste it in the sidebar.")
+        st.error("No OpenAI API key found. Add to Streamlit Secrets or paste in the sidebar.")
     else:
-        openai.api_key = openai_api_key
+        # create a client per-request (safe for small apps)
+        client = OpenAI(api_key=openai_api_key)
 
-        # Call OpenAI Chat Completions (non-streaming)
         try:
             with st.spinner("Contacting OpenAI..."):
-                resp = openai.ChatCompletion.create(
+                # New v1+ call
+                completion = client.chat.completions.create(
                     model=model,
                     messages=st.session_state.messages,
                     temperature=float(temperature),
                     max_tokens=800,
                 )
 
-            assistant_msg = resp["choices"][0]["message"]["content"].strip()
-            st.session_state.messages.append({"role": "assistant", "content": assistant_msg})
+            # Access assistant text (same shape as old API)
+            assistant_text = completion.choices[0].message.content.strip()
+            st.session_state.messages.append({"role": "assistant", "content": assistant_text})
             with st.chat_message("assistant"):
-                st.write(assistant_msg)
+                st.write(assistant_text)
 
-            # Show usage if available
-            if "usage" in resp:
-                u = resp["usage"]
-                st.sidebar.markdown(
-                    f"**Usage:** prompt {u.get('prompt_tokens',0)} | completion {u.get('completion_tokens',0)} | total {u.get('total_tokens',0)}"
-                )
+            # Show token usage if present
+            usage = getattr(completion, "usage", None)
+            if usage:
+                prompt_tokens = getattr(usage, "prompt_tokens", None) or usage.get("prompt_tokens", None)
+                completion_tokens = getattr(usage, "completion_tokens", None) or usage.get("completion_tokens", None)
+                total = getattr(usage, "total_tokens", None) or usage.get("total_tokens", None)
+                st.sidebar.markdown(f"**Usage:** prompt {prompt_tokens} | completion {completion_tokens} | total {total}")
 
-        except openai.error.OpenAIError as e:
+        except APIError as e:
             st.error(f"OpenAI API error: {e}")
         except Exception as e:
+            # Generic fallback for unexpected issues
             st.error(f"Unexpected error: {e}")
 
 st.markdown("---")
-st.markdown(
-    "⚠️ **Security note:** On Streamlit Cloud prefer using the Secrets UI (do **not** commit keys to GitHub)."
-)
+st.markdown("⚠️ **Security note:** Use Streamlit Secrets (recommended) — don't commit keys to GitHub.")
